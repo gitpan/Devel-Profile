@@ -1,4 +1,8 @@
 
+1.03	[2003 Dec 8]
+	changed output format of <anon> lines
+	better time calculation for unfinished subs
+
 1.02	[2003 Jul 9]
 	handle void context
 	fix periodic save

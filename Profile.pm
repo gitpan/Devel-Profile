@@ -5,7 +5,7 @@
 # Date: 2002-Jun-21 22:19 (EDT)
 # Function: code profiler
 #
-# $Id: Profile.pm,v 1.14 2003/07/09 22:47:39 jaw Exp jaw $
+# $Id: Profile.pm,v 1.16 2003/12/08 23:43:05 jaw Exp jaw $
 
 # Dost thou love life? Then do not squander time
 #   -- Benjamin Franklin
@@ -82,7 +82,7 @@ BEGIN {
     require Time::HiRes; Time::HiRes->import('time');
 }
 
-$VERSION = "1.02";
+$VERSION = "1.03";
 
 my $t0     = time();	# start time
 my $tsav   = $t0;	# time of last save
@@ -116,7 +116,9 @@ sub sub {
     my $sx = "$sub";
     if( $sx =~ /CODE/ ){
 	my @c = caller;
-	$sx = "<anon>:$c[0]:$c[2]";
+	# was 0, now 1
+	# nb: @c = (pkg, file, line, ...)
+	$sx = "<anon>:$c[1]:$c[2]";
     }
     push @prof_stack, [$sx, $ti, $st];
     my $ss = @prof_stack;
@@ -205,15 +207,18 @@ sub save {
     
     # calc time of subs that never finished, by unwinding the saved call stack
     my $xend = $tnow;
+    my $xacc = $tacc;
     foreach my $sk (reverse @prof_stack){
 	# since it didn't return, we only adjust by half of Tadj
-	my $t = $xend - $sk->[1];
-	$times{ $sk->[0] } += $t - $tadj/2;
-	$calls{ $sk->[0] } ++;
+	my $sn = $sk->[0];
+	my $t = $xend - $sk->[1] - ($xacc - $sk->[2]);
+	$times{ $sn } += $t - $tadj/2;
+	$calls{ $sn } ++;
 	# and since we are using different math, and a different estimate of
 	# the profiling overhead, we display a flag alerting the user
-	$flags{$sk->[0]} |= 2;
+	$flags{ $sn } |= 2;
 	$xend = $sk->[1];
+	$xacc = $sk->[2];
 	$tprof += $tadj/2;
 	$calladj ++;
     }
@@ -254,8 +259,16 @@ sub save {
 	my $t = $times{$s};
 	my $tpc = $t / ($c || 1);
 	my $pct = $t * 100 / $tt;
+	my $sp = $s;
 
-	printf F "%5.2f %9.4f  %7d  %9.6f %2s  $s\n", 
+	if( $sp =~ /^<anon>/ ){
+	    # make prettier
+	    if( length($sp) > 35 ){
+		$sp = '<anon>:...' . substr($sp, -28, 28);
+	    }
+	}
+	
+	printf F "%5.2f %9.4f  %7d  %9.6f %2s  $sp\n", 
 	$pct, $t, $c, $tpc, F($flags{$s});
     }
     close F;
