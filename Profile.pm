@@ -5,7 +5,7 @@
 # Date: 2002-Jun-21 22:19 (EDT)
 # Function: code profiler
 #
-# $Id: Profile.pm,v 1.8 2003/04/11 19:43:53 jaw Exp jaw $
+# $Id: Profile.pm,v 1.12 2003/04/14 20:14:07 jaw Exp $
 
 # Dost thou love life? Then do not squander time
 #   -- Benjamin Franklin
@@ -42,7 +42,7 @@ To profile a Perl script, run the perl interpreter with the -d debugging switch.
 The profiler uses the debugging hooks.
 So to profile script test.pl the following command should be used:
 
-	perl5 -d:Profile test.pl  
+	perl -d:Profile test.pl  
 
 When the script terminates (or periodicly while running, see ENVIRONMENT) the profiler will dump
 the profile information to a file called F<prof.out>. This file is human-readable, no
@@ -57,6 +57,7 @@ Note: Statistics are kept per sub, not per line.
 =item C<PERL_PROFILE_SAVETIME>
 
 How often to save profile data while running, in seconds, 0 to save only at exit.
+The default is every 2 minutes.
 
 =item C<PERL_PROFILE_FILENAME>
 
@@ -76,8 +77,12 @@ This reduces the effective runtime of the program, and the calculated percentage
 # more POD at end
 
 package DB;
-use Time::HiRes qw(time);
-$VERSION = "1.00";
+BEGIN {
+    sub DB {}
+    require Time::HiRes; Time::HiRes->import('time');
+}
+
+$VERSION = "1.01";
 
 my $t0     = time();	# start time
 my $tsav   = $t0;	# time of last save
@@ -85,19 +90,19 @@ my $tacc   = 0;		# total time accumulated
 my $tacc0  = 0;		# total time accumulated at start (or reset)
 my $Tadj   = 0;		# estimated profiling overhead
 my $call   = 0;		# total number of calls
+my $except = 0;		# total number of exceptions handled (est)
 my $saving = 0;		# save in progress
 my $tprof_save = 0;	# time spent saving data
 my %prof_calls = ();	# number of calls per sub
 my %prof_times = ();	# total time per sub
+my %prof_flags = ();
 my @prof_stack = ();	# call stack, to account for subs that have't returned
 
 my $TSAVE = defined($ENV{PERL_PROFILE_SAVETIME}) ? $ENV{PERL_PROFILE_SAVETIME} : 120; 
-my $NCALOOP = 10000;
+my $NCALOOP = 1000;
 
 $SIG{USR2} = \&reset;
-$SIG{USR1} = \&save;
 
-sub DB {}
 sub sub {
 
     # save first, keeps timing calculations simpler
@@ -111,7 +116,8 @@ sub sub {
 	$sx = "<anon>:$c[0]:$c[2]";
     }
     push @prof_stack, [$sx, $ti, $st];
-
+    my $ss = @prof_stack;
+    
     my( $wa, $r, @r );
     if( wantarray ){
 	$wa = 1;
@@ -120,6 +126,24 @@ sub sub {
 	$r = &$sub;
     }
 
+    if( $ss < @prof_stack ){
+	# we took an exception - account for aborted subs
+	# print STDERR "exception detected!\n";
+	
+	while( $ss < @prof_stack ){
+	    my $sk = pop @prof_stack;
+	    my $sn = $sk->[0];
+	    my $t  = time() - $sk->[1] - ($tacc - $sk->[2]);
+	    $tacc += $t;
+	    $prof_times{$sn} += $t;
+	    $prof_calls{$sn} ++;
+	    $prof_flags{$sn} |= 2;
+	    $call ++;
+	}
+	$except++;
+	$prof_flags{$sx} |= 4;
+    }
+    
     if( pop @prof_stack ){		# do not update if reset
 	my $t = time() - $ti		# total time of called sub
 	    - ($tacc - $st);		# minus time of subs it called
@@ -128,7 +152,7 @@ sub sub {
 	$prof_calls{$sx} ++;		# But from its loss
 	$call ++;			#   -- Edward Young, Night Thoughts
     }
-    
+
     if( $wa ){
 	@r;
     }else{
@@ -139,6 +163,7 @@ sub sub {
 sub save {
     return if $saving;
     $saving = 1;
+    return unless $call;	# nothing to report...
     
     my $tnow = time();
     my $ttwall = $tnow - $t0;
@@ -158,6 +183,7 @@ sub save {
     # adjust run times
     my( %times, %calls, %flags );
     %calls = %prof_calls;
+    %flags = %prof_flags;
     foreach (keys %prof_times){
 	$times{$_} = $prof_times{$_} - $tadj * $prof_calls{$_};
     }
@@ -177,7 +203,7 @@ sub save {
 	$calls{ $sk->[0] } ++;
 	# and since we are using different math, and a different estimate of
 	# the profiling overhead, we display a flag alerting the user
-	$flags{$sk->[0]} = '?';
+	$flags{$sk->[0]} |= 2;
 	$xend = $sk->[1];
 	$tprof += $tadj/2;
 	$calladj ++;
@@ -188,7 +214,7 @@ sub save {
 	my $tnaked = $xend - $t0 - ($tacc - $tacc0);
 	$times{'<other>'} = $tnaked;
 	$calls{'<other>'} = 0;
-	$flags{'<other>'}  = '*';
+	$flags{'<other>'} |= 1;
     }
 
     # total run time of program
@@ -206,7 +232,8 @@ sub save {
     printf F "missing time:          %.4f  (%.2f%%)\n", $tmissing, 100 * $tmissing / $ttwall
 	if( $tmissing / $ttwall > 0.0001 );
     print F "number of calls:       ", $call + $calladj, "\n";
-
+    print F "number of exceptions:  $except\n" if $except;
+    
     print F "\n%Time    Sec.     \#calls   sec/call  F  name\n";
     foreach my $s (sort {$times{$b} <=> $times{$a}} keys %times){
 	my $c = $calls{$s};
@@ -215,7 +242,7 @@ sub save {
 	my $pct = $t * 100 / $tt;
 
 	printf F "%5.2f %9.4f  %7d  %9.6f %2s  $s\n", 
-	$pct, $t, $c, $tpc, $flags{$s};
+	$pct, $t, $c, $tpc, F($flags{$s});
     }
     close F;
 
@@ -230,13 +257,20 @@ sub save {
     $saving = 0;
 }
 
+# 1=> *, 2=>?, 4=>x
+sub F {
+    ('', '*', '?', '?*', 'x', 'x*', 'x?', 'X?')[shift || 0];
+}
+
 sub reset {
     save();
-    $t0    = time();
-    $tacc0 = $tacc;
-    $call  = 0;
+    $t0     = time();
+    $tacc0  = $tacc;
+    $call   = 0;
+    $except = 0;
     %prof_calls = ();
     %prof_times = ();
+    %prof_flags = ();
     @prof_stack = ();
 }
 
@@ -333,19 +367,44 @@ Flags.
 
 =over 4
 
-=item *
+=item C<*>
 
-pseudo-function to account for otherwise unacoounted for tim.
+pseudo-function to account for otherwise unacounted for time.
     
-=item ?
+=item C<?>
 
 At least one call of this subroutine did not return (typically because
-of an C<exit()>). The statistics for it may be slightly off.
+of an C<exit>, or C<die>). The statistics for it may be slightly off.
 
-=back
+=item C<x>
+
+At least one call of this subroutine trapped an exception. 
+The statistics for it may be slightly off.
     
 =back
     
+=back
+
+=head1 LONG RUNNING PROGRAMS
+
+This module was written so that the author could profile a large long-running
+(daemon) program. Since normally, this program never exited, saving profiling
+data only at program exit was not an interesting option. This module will save
+profiling data periodically based on $PERL_PROFILE_SAVETIME, or the program
+being profiled can call C<DB::save()> at any time. This allows you to watch
+your profiling data while the program is running.
+
+The above program also had a very large startup phase (reading config files,
+building data structures, etc), the author wanted to see profiling data
+for the startup phase, and for the running phase seperately. The running
+program can call C<DB::reset()> to save the profiling data and reset the
+statistics. Once reset, only "stuff" that happens from that point on will be
+reflected in the profile data file.
+
+By default, reset is attached to the signal handler for C<SIGUSR2>.
+Using a perl built with "safe signal handling" (5.8.0 and higher),
+you may safely send this signal to control profiling.
+
 =head1 BUGS
 
 There are no known bugs in the module.
