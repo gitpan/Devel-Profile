@@ -1,4 +1,8 @@
 
+1.02	[2003 Jul 9]
+	handle void context
+	fix periodic save
+
 1.01	[2003 Apr 15]
 	corrected documentation
 	added test scripts

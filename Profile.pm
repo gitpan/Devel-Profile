@@ -5,7 +5,7 @@
 # Date: 2002-Jun-21 22:19 (EDT)
 # Function: code profiler
 #
-# $Id: Profile.pm,v 1.12 2003/04/14 20:14:07 jaw Exp $
+# $Id: Profile.pm,v 1.14 2003/07/09 22:47:39 jaw Exp jaw $
 
 # Dost thou love life? Then do not squander time
 #   -- Benjamin Franklin
@@ -82,21 +82,21 @@ BEGIN {
     require Time::HiRes; Time::HiRes->import('time');
 }
 
-$VERSION = "1.01";
+$VERSION = "1.02";
 
 my $t0     = time();	# start time
 my $tsav   = $t0;	# time of last save
 my $tacc   = 0;		# total time accumulated
 my $tacc0  = 0;		# total time accumulated at start (or reset)
-my $Tadj   = 0;		# estimated profiling overhead
 my $call   = 0;		# total number of calls
 my $except = 0;		# total number of exceptions handled (est)
 my $saving = 0;		# save in progress
 my $tprof_save = 0;	# time spent saving data
 my %prof_calls = ();	# number of calls per sub
 my %prof_times = ();	# total time per sub
-my %prof_flags = ();
-my @prof_stack = ();	# call stack, to account for subs that have't returned
+my %prof_flags = ();	# flags
+my @prof_stack = ();	# call stack, to account for subs that haven't returned
+my $want_reset = 0;	# reset request pending
 
 my $TSAVE = defined($ENV{PERL_PROFILE_SAVETIME}) ? $ENV{PERL_PROFILE_SAVETIME} : 120; 
 my $NCALOOP = 1000;
@@ -105,11 +105,14 @@ $SIG{USR2} = \&reset;
 
 sub sub {
 
+    my $ti = time();	# wall time at start
     # save first, keeps timing calculations simpler
-    save() if( !$saving && $TSAVE && ($^T - $tsav) > $TSAVE );
+    if( !$saving && $TSAVE && ($ti - $tsav) > $TSAVE ){
+	save();
+	$ti = time();	# update to account for save
+    }
     
     my $st = $tacc;	# accum time at start
-    my $ti = time();	# wall time at start
     my $sx = "$sub";
     if( $sx =~ /CODE/ ){
 	my @c = caller;
@@ -119,11 +122,13 @@ sub sub {
     my $ss = @prof_stack;
     
     my( $wa, $r, @r );
-    if( wantarray ){
-	$wa = 1;
+    $wa = wantarray;
+    if( $wa ){
 	@r = &$sub;
-    }else{
+    }elsif( defined $wa ){
 	$r = &$sub;
+    }else{
+	&$sub;
     }
 
     if( $ss < @prof_stack ){
@@ -162,8 +167,12 @@ sub sub {
 
 sub save {
     return if $saving;
+    unless( $call ){
+	# nothing to report
+	$tsav = time();
+	return;
+    }
     $saving = 1;
-    return unless $call;	# nothing to report...
     
     my $tnow = time();
     my $ttwall = $tnow - $t0;
@@ -212,6 +221,11 @@ sub save {
     # calc time for other: "naked" code, ???
     unless( $ENV{PERL_PROFILE_DONT_OTHER} ){
 	my $tnaked = $xend - $t0 - ($tacc - $tacc0);
+	if( $tnaked < 0 ){
+	    # dang! mis-estimates threw our numbers off by too much
+	    # print STDERR "dang: $tnaked = $xend - $t0 - ($tacc - $tacc0)\n";
+	    $tnaked = 0;
+	}
 	$times{'<other>'} = $tnaked;
 	$calls{'<other>'} = 0;
 	$flags{'<other>'} |= 1;
@@ -255,6 +269,7 @@ sub save {
     $tprof_save += $telap;
     
     $saving = 0;
+    reset() if $want_reset;
 }
 
 # 1=> *, 2=>?, 4=>x
@@ -263,6 +278,10 @@ sub F {
 }
 
 sub reset {
+    if( $saving ){
+	$want_reset = 1;
+	return;
+    }
     save();
     $t0     = time();
     $tacc0  = $tacc;
@@ -272,6 +291,7 @@ sub reset {
     %prof_times = ();
     %prof_flags = ();
     @prof_stack = ();
+    $want_reset = 0;
 }
 
 END {
