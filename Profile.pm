@@ -1,0 +1,364 @@
+# -*- perl -*-
+
+# Copyright (c) 2002 by Jeff Weisberg
+# Author: Jeff Weisberg <jaw+profile @ tcp4me.com>
+# Date: 2002-Jun-21 22:19 (EDT)
+# Function: code profiler
+#
+# $Id: Profile.pm,v 1.8 2003/04/11 19:43:53 jaw Exp jaw $
+
+# Dost thou love life? Then do not squander time
+#   -- Benjamin Franklin
+
+# start as:
+#   env PERL5DB='BEGIN{require "src/Profile.pm"}' perl -d program.pl
+#   or: perl -d:Profile program.pl
+# data gets saved in 'prof.out'
+
+# motivation:
+#   Devel::DProf appears to have issues. when it is used
+#     9 times out of 10 it produces output that is unusable by dprofpp (even with -F)
+#     the statistics are often obviously wrong
+#     it causes crashage
+# of course, this code isn't really any better....
+
+=head1 NAME
+
+Devel::Profile - tell me why my perl program runs so slowly
+
+=head1 SYNOPSIS
+
+    perl -d:Profile program.pl
+    less prof.out
+
+=head1 DESCRIPTION
+
+The Devel::Profile package is a Perl code profiler.
+This will collect information on the execution time of a Perl script and of the subs in that script.
+This information can be used to determine which subroutines are using the most time and which
+subroutines are being called most often.
+
+To profile a Perl script, run the perl interpreter with the -d debugging switch.
+The profiler uses the debugging hooks.
+So to profile script test.pl the following command should be used:
+
+	perl5 -d:Profile test.pl  
+
+When the script terminates (or periodicly while running, see ENVIRONMENT) the profiler will dump
+the profile information to a file called F<prof.out>. This file is human-readable, no
+additional tool is required to read it.
+
+Note: Statistics are kept per sub, not per line.
+
+=head1 ENVIRONMENT
+
+=over 4
+
+=item C<PERL_PROFILE_SAVETIME>
+
+How often to save profile data while running, in seconds, 0 to save only at exit.
+
+=item C<PERL_PROFILE_FILENAME>
+
+Filename to save profile data to, default is F<prof.out>
+
+=item C<PERL_PROFILE_DONT_OTHER>
+
+Time spent running code not in 'subs' (such as naked code in main) won\'t
+get accounted for in the normal manner. By default, we account for this time
+in the sub '<other>'. With this variable set, we leave it as 'missing' time.
+This reduces the effective runtime of the program, and the calculated percentages.
+
+=back
+
+=cut
+    ;
+# more POD at end
+
+package DB;
+use Time::HiRes qw(time);
+$VERSION = "1.00";
+
+my $t0     = time();	# start time
+my $tsav   = $t0;	# time of last save
+my $tacc   = 0;		# total time accumulated
+my $tacc0  = 0;		# total time accumulated at start (or reset)
+my $Tadj   = 0;		# estimated profiling overhead
+my $call   = 0;		# total number of calls
+my $saving = 0;		# save in progress
+my $tprof_save = 0;	# time spent saving data
+my %prof_calls = ();	# number of calls per sub
+my %prof_times = ();	# total time per sub
+my @prof_stack = ();	# call stack, to account for subs that have't returned
+
+my $TSAVE = defined($ENV{PERL_PROFILE_SAVETIME}) ? $ENV{PERL_PROFILE_SAVETIME} : 120; 
+my $NCALOOP = 10000;
+
+$SIG{USR2} = \&reset;
+$SIG{USR1} = \&save;
+
+sub DB {}
+sub sub {
+
+    # save first, keeps timing calculations simpler
+    save() if( !$saving && $TSAVE && ($^T - $tsav) > $TSAVE );
+    
+    my $st = $tacc;	# accum time at start
+    my $ti = time();	# wall time at start
+    my $sx = "$sub";
+    if( $sx =~ /CODE/ ){
+	my @c = caller;
+	$sx = "<anon>:$c[0]:$c[2]";
+    }
+    push @prof_stack, [$sx, $ti, $st];
+
+    my( $wa, $r, @r );
+    if( wantarray ){
+	$wa = 1;
+	@r = &$sub;
+    }else{
+	$r = &$sub;
+    }
+
+    if( pop @prof_stack ){		# do not update if reset
+	my $t = time() - $ti		# total time of called sub
+	    - ($tacc - $st);		# minus time of subs it called
+	$tacc += $t;
+	$prof_times{$sx} += $t;		# We take no note of time
+	$prof_calls{$sx} ++;		# But from its loss
+	$call ++;			#   -- Edward Young, Night Thoughts
+    }
+    
+    if( $wa ){
+	@r;
+    }else{
+	$r;
+    }
+}
+
+sub save {
+    return if $saving;
+    $saving = 1;
+    
+    my $tnow = time();
+    my $ttwall = $tnow - $t0;
+    my $f = $ENV{PERL_PROFILE_FILENAME} || 'prof.out';
+    open( F, "> $f" ) || die "open failed, $f $!\n";
+
+    # calc. an estimate of Tadj (overhead of DB::sub)
+    # Tadj = 3/4 of the fastest sub
+    my $tadj;
+    foreach my $s (keys %prof_times){
+	next unless $prof_calls{$s} >= 10;
+	my $t = $prof_times{$s} / $prof_calls{$s};
+	$tadj = $t if !defined($tadj) || $t < $tadj;
+    }
+    $tadj *= .75;
+    
+    # adjust run times
+    my( %times, %calls, %flags );
+    %calls = %prof_calls;
+    foreach (keys %prof_times){
+	$times{$_} = $prof_times{$_} - $tadj * $prof_calls{$_};
+    }
+    
+    # calculate profiling overhead, and hide our droppings
+    my $calladj = 0;
+    my $tprof = $tadj * $call + $times{Devel::Profile::__db_calibrate_adj} + $tprof_save;
+    delete $times{Devel::Profile::__db_calibrate_adj};
+    $calladj = 0 - $prof_calls{Devel::Profile::__db_calibrate_adj};
+    
+    # calc time of subs that never finished, by unwinding the saved call stack
+    my $xend = $tnow;
+    foreach my $sk (reverse @prof_stack){
+	# since it didn't return, we only adjust by half of Tadj
+	my $t = $xend - $sk->[1];
+	$times{ $sk->[0] } += $t - $tadj/2;
+	$calls{ $sk->[0] } ++;
+	# and since we are using different math, and a different estimate of
+	# the profiling overhead, we display a flag alerting the user
+	$flags{$sk->[0]} = '?';
+	$xend = $sk->[1];
+	$tprof += $tadj/2;
+	$calladj ++;
+    }
+    
+    # calc time for other: "naked" code, ???
+    unless( $ENV{PERL_PROFILE_DONT_OTHER} ){
+	my $tnaked = $xend - $t0 - ($tacc - $tacc0);
+	$times{'<other>'} = $tnaked;
+	$calls{'<other>'} = 0;
+	$flags{'<other>'}  = '*';
+    }
+
+    # total run time of program
+    my $tt;
+    foreach (values %times){$tt += $_}
+
+    # dreams are very curious and unaccountable things
+    #   -- Homer, Odyssey
+    # unaccounted for "missing" time
+    my $tmissing = $ttwall - $tt - $tprof;
+    
+    printf F "time elapsed (wall):   %.4f\n",           $ttwall;
+    printf F "time running program:  %.4f  (%.2f%%)\n", $tt,       100 * $tt / $ttwall;
+    printf F "time profiling (est.): %.4f  (%.2f%%)\n", $tprof,    100 * $tprof / $ttwall;
+    printf F "missing time:          %.4f  (%.2f%%)\n", $tmissing, 100 * $tmissing / $ttwall
+	if( $tmissing / $ttwall > 0.0001 );
+    print F "number of calls:       ", $call + $calladj, "\n";
+
+    print F "\n%Time    Sec.     \#calls   sec/call  F  name\n";
+    foreach my $s (sort {$times{$b} <=> $times{$a}} keys %times){
+	my $c = $calls{$s};
+	my $t = $times{$s};
+	my $tpc = $t / ($c || 1);
+	my $pct = $t * 100 / $tt;
+
+	printf F "%5.2f %9.4f  %7d  %9.6f %2s  $s\n", 
+	$pct, $t, $c, $tpc, $flags{$s};
+    }
+    close F;
+
+    # Let every man be master of his time
+    #   -- Shakespeare, Macbeth
+    # account for time spent saving data
+    $tsav = time();
+    my $telap = $tsav - $tnow;
+    $tacc += $telap;
+    $tprof_save += $telap;
+    
+    $saving = 0;
+}
+
+sub reset {
+    save();
+    $t0    = time();
+    $tacc0 = $tacc;
+    $call  = 0;
+    %prof_calls = ();
+    %prof_times = ();
+    @prof_stack = ();
+}
+
+END {
+    save();
+}
+
+################################################################
+package Devel::Profile;
+sub __db_calibrate_adj {
+    my $x = shift;
+}
+for my $i (1..$NCALOOP){
+    __db_calibrate_adj();
+}
+
+################################################################
+
+#	o   When execution of the program reaches a subroutine
+#	    call, a call to "&DB::sub"(args) is made instead, with
+#	    "$DB::sub" holding the name of the called subroutine.
+#	    This doesn't happen if the subroutine was compiled in
+#	    the "DB" package.)
+
+################################################################
+
+=head1 OUTPUT FORMAT
+
+example ouput:
+    
+    time elapsed (wall):   86.8212
+    time running program:  65.7657  (75.75%)
+    time profiling (est.): 21.0556  (24.25%)
+    number of calls:       647248
+    
+    %Time    Sec.     #calls   sec/call  F  name
+    31.74   20.8770     2306   0.009053     Configable::init_from_config
+    20.09   13.2116   144638   0.000091     Configable::init_field_from_config
+    17.49   11.5043   297997   0.000039     Configable::has_attr
+     8.22    5.4028      312   0.017317     MonEl::recycle
+     7.54    4.9570    64239   0.000077     Configable::inherit
+     5.02    3.3042   101289   0.000033     MonEl::unique
+    [...]
+
+This is a small summary, followed by one line per sub.
+
+=over 4
+  
+=item time elapsed (wall)
+
+This is the total time elapsed.
+
+=item time running program
+
+This is the amount of time spent running your program.
+
+=item time profiling
+
+This is the amount of time wasted due to profiler overhead.
+
+=item number of calls
+
+This is the total number of subroutine calls your program made.
+
+=back
+
+Followed by one line per subroutine.
+
+=over 4
+
+=item name
+
+The name of the subroutine.
+
+=item %Time
+
+The percentage of the total program runtime used by this subroutine.
+
+=item Sec.
+
+The total number of seconds used by this subroutine.
+    
+=item #calls
+
+The number of times this subroutine was called.
+    
+=item sec/call
+
+The average number of seconds this subroutines takes each time it is called.
+    
+=item F
+
+Flags.
+
+=over 4
+
+=item *
+
+pseudo-function to account for otherwise unacoounted for tim.
+    
+=item ?
+
+At least one call of this subroutine did not return (typically because
+of an C<exit()>). The statistics for it may be slightly off.
+
+=back
+    
+=back
+    
+=head1 BUGS
+
+There are no known bugs in the module.
+
+=head1 SEE ALSO
+
+    Yellowstone National Park.
+
+=head1 AUTHOR
+
+Jeff Weisberg - http://www.tcp4me.com/
+
+=cut
+    ;
+
+1;
