@@ -1,4 +1,7 @@
 
+1.04	[2004 Apr 29]
+	regex issue
+
 1.03	[2003 Dec 8]
 	changed output format of <anon> lines
 	better time calculation for unfinished subs

@@ -5,7 +5,7 @@
 # Date: 2002-Jun-21 22:19 (EDT)
 # Function: code profiler
 #
-# $Id: Profile.pm,v 1.16 2003/12/08 23:43:05 jaw Exp jaw $
+# $Id: Profile.pm,v 1.17 2004/04/29 21:15:01 jaw Exp $
 
 # Dost thou love life? Then do not squander time
 #   -- Benjamin Franklin
@@ -82,7 +82,7 @@ BEGIN {
     require Time::HiRes; Time::HiRes->import('time');
 }
 
-$VERSION = "1.03";
+$VERSION = "1.04";
 
 my $t0     = time();	# start time
 my $tsav   = $t0;	# time of last save
@@ -113,8 +113,8 @@ sub sub {
     }
     
     my $st = $tacc;	# accum time at start
-    my $sx = "$sub";
-    if( $sx =~ /CODE/ ){
+    my $sx = $sub;
+    if( ref $sx ){
 	my @c = caller;
 	# was 0, now 1
 	# nb: @c = (pkg, file, line, ...)
@@ -261,7 +261,7 @@ sub save {
 	my $pct = $t * 100 / $tt;
 	my $sp = $s;
 
-	if( $sp =~ /^<anon>/ ){
+	if( substr($sp, 0, 6) eq '<anon>' ){
 	    # make prettier
 	    if( length($sp) > 35 ){
 		$sp = '<anon>:...' . substr($sp, -28, 28);
