@@ -5,7 +5,7 @@
 # Date: 2002-Jun-21 22:19 (EDT)
 # Function: code profiler
 #
-# $Id: Profile.pm,v 1.17 2004/04/29 21:15:01 jaw Exp $
+# $Id: Profile.pm,v 1.22 2007/03/08 02:25:42 jaw Exp $
 
 # Dost thou love life? Then do not squander time
 #   -- Benjamin Franklin
@@ -76,13 +76,14 @@ This reduces the effective runtime of the program, and the calculated percentage
     ;
 # more POD at end
 
+package Devel::Profile;
+$VERSION = "1.05";
+
 package DB;
 BEGIN {
     sub DB {}
     require Time::HiRes; Time::HiRes->import('time');
 }
-
-$VERSION = "1.04";
 
 my $t0     = time();	# start time
 my $tsav   = $t0;	# time of last save
@@ -97,6 +98,7 @@ my %prof_times = ();	# total time per sub
 my %prof_flags = ();	# flags
 my @prof_stack = ();	# call stack, to account for subs that haven't returned
 my $want_reset = 0;	# reset request pending
+my $prof_pid   = $$;	# process id
 
 my $TSAVE = defined($ENV{PERL_PROFILE_SAVETIME}) ? $ENV{PERL_PROFILE_SAVETIME} : 120; 
 my $NCALOOP = 1000;
@@ -175,6 +177,9 @@ sub save {
 	return;
     }
     $saving = 1;
+
+    # only parent process
+    return unless $$ == $prof_pid;
     
     my $tnow = time();
     my $ttwall = $tnow - $t0;
@@ -313,6 +318,7 @@ END {
 
 ################################################################
 package Devel::Profile;
+use strict;
 sub __db_calibrate_adj {
     my $x = shift;
 }
@@ -438,14 +444,32 @@ By default, reset is attached to the signal handler for C<SIGUSR2>.
 Using a perl built with "safe signal handling" (5.8.0 and higher),
 you may safely send this signal to control profiling.
 
+=head1 BUT I WANT INCLUSIVE TIMES NOT EXCLUSIVE TIMES
+
+Please see the spin-off module Devel::DProfLB.    
+
 =head1 BUGS
 
-There are no known bugs in the module.
+Some buggy XS based perl modules can behave erroneously when
+run under the perl debugger. Since Devel::Profile uses the perl
+debugger interfaces, these modules will also behave erroneously
+when being profiled.
+    
+There are no known bugs in this module.
+
+=head1 LICENSE
+    
+This software may be copied and distributed under the terms
+found in the Perl "Artistic License".
+
+A copy of the "Artistic License" may be found in the standard
+Perl distribution.
 
 =head1 SEE ALSO
 
     Yellowstone National Park.
-
+    Devel::DProfLB
+    
 =head1 AUTHOR
 
 Jeff Weisberg - http://www.tcp4me.com/
